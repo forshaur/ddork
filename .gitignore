@@ -39,3 +39,6 @@ dist/
 .DS_Store
 Thumbs.db
 
+# Cloned external repo
+isbounty/
+
