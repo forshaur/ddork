@@ -17,6 +17,8 @@ from .config import (
     CLASSIFIER_PACKAGE,
     DDORK_GIT_URL,
     DDORK_PACKAGE,
+    LOG_FILE,
+    display_path,
     log,
 )
 from .version import check_updates, is_outdated
@@ -163,7 +165,7 @@ def update_packages():
     if success_all:
         print(f"  {palette.neutral('[')}{palette.success('+')}{palette.neutral(']')} {palette.bold('All packages are up to date.')}\n", flush=True)
     else:
-        print(f"  {palette.neutral('[')}{palette.error('!')}{palette.neutral(']')} {palette.bold('One or more updates failed. Check logs in scan.log.')}\n", flush=True)
+        print(f"  {palette.neutral('[')}{palette.error('!')}{palette.neutral(']')} {palette.bold(f'One or more updates failed. Check logs in {display_path(LOG_FILE)}.')}\n", flush=True)
 
     return success_all
 

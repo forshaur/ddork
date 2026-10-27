@@ -17,8 +17,13 @@ TIPS = [
         f"{palette.bold('--enumerate-only targets.txt')}."
     ),
     (
-        "Domains without policy signals (NOT_PROGRAM) are hidden by default. Use "
-        f"{palette.bold('--all')} to show every analyzed domain."
+        "Domains without policy signals (NOT_PROGRAM) are not saved by default. Use "
+        f"{palette.bold('--all')} to also save them to ~/.ddork/not_program.txt."
+    ),
+    (
+        "Program links from every run are appended to "
+        f"{palette.bold('~/.ddork/paid_programs.txt')} and {palette.bold('~/.ddork/vdp.txt')}, "
+        "one dated block per run."
     ),
 ]
 

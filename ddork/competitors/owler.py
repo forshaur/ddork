@@ -31,7 +31,8 @@ def get_owler_competitors(domain):
             )
         if 400 <= r.status_code < 500:
             raise NonRetryable(
-                f"owler {domain}: HTTP {r.status_code}: {r.text[:200]!r}"
+                f"owler {domain}: HTTP {r.status_code}: {r.text[:200]!r}",
+                status=r.status_code,
             )
         if r.status_code != 200:
             raise RuntimeError(

@@ -171,21 +171,26 @@ async def analyze_domain(domain, semaphore, limiter, ui=None):
         return {"domain": domain, "findings": findings}
 
 
-async def run_workflow(domains, workers=8, limiter=None, ui=None):
+async def run_workflow(domains, workers=8, limiter=None, ui=None, results=None):
+    """Analyze `domains`; per-domain results are appended to `results` as they
+    finish, so a caller holding the list can save partial progress."""
     if limiter is None:
         limiter = domain_limiter
     sem = aio.Semaphore(max(1, workers))
     total = len(domains)
-    results = []
+    results = [] if results is None else results
     start = time.monotonic()
 
     if ui:
         ui.phase("probing", total)
+        ui.tally([])  # show the live PAID_BB / VDP counts from the start
 
     tasks = [aio.create_task(analyze_domain(d, sem, limiter, ui)) for d in domains]
     for t in aio.as_completed(tasks):
-        results.append(await t)
+        r = await t
+        results.append(r)
         if ui:
+            ui.tally(r["findings"])
             ui.advance()
 
     if ui:

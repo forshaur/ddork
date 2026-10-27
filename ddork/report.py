@@ -1,20 +1,19 @@
-"""Console report rendering and file output.
+"""Run summary, saved program lists, and TSV output.
 
-Layout: one entry per finding, grouped under a label header.
+The terminal shows counts only. Program links are appended to one text file
+per label under ~/.ddork, each run starting with a dated separator:
 
-    PAID_BB
-      acme.com                                              sec.txt
-        https://acme.com/security
-        bug_bounty_signal → PAID_BB_VERIFIED
+    # ===== 2026-10-28 14:05 · seed example.com · 2 link(s) =====
+    https://acme.com/security
+    https://hackerone.com/widgetco
 
-The source tag is right-aligned on the domain line in muted grey. URLs are
-never truncated; they sit on their own line. Hidden NOT_PROGRAM findings are
-still counted in the header.
-
-Color roles: labels use success/brand/muted, URLs use link, decision path
-and source are muted.
+Color roles: labels use success/brand/muted, paths are links.
 """
+import os
+import time
+
 from .colors import palette
+from .config import ensure_home
 
 LABEL_ORDER = {"PAID_BB": 0, "VDP": 1, "NOT_PROGRAM": 2}
 LABELS = tuple(LABEL_ORDER.keys())
@@ -25,7 +24,12 @@ _LABEL_COLOR = {
     "NOT_PROGRAM": "muted",
 }
 
-_WIDTH = 72
+# Label -> saved-list filename. NOT_PROGRAM is only written with --all.
+PROGRAM_FILES = {
+    "PAID_BB":     "paid_programs.txt",
+    "VDP":         "vdp.txt",
+    "NOT_PROGRAM": "not_program.txt",
+}
 
 
 def _flatten(results):
@@ -39,67 +43,51 @@ def _sort_key(f):
     return (LABEL_ORDER.get(f["label"], 9), -f["confidence"], f["domain"])
 
 
-def _print_header(total, paid, vdp, hidden):
-    print(
-        f"  {palette.bold(str(total))} findings   "
-        f"{palette.muted('·')}   "
-        f"{palette.success('PAID_BB')} {paid}   "
-        f"{palette.brand('VDP')} {vdp}   "
-        f"{palette.muted('NOT_PROGRAM')} {hidden} {palette.muted('(hidden)')}"
-    )
+def _links(results):
+    """{label: [unique links]}, best first. A finding without a URL uses its domain."""
+    links = {label: [] for label in LABELS}
+    for f in sorted(_flatten(results), key=_sort_key):
+        link = f.get("url") or f["domain"]
+        if f["label"] in links and link not in links[f["label"]]:
+            links[f["label"]].append(link)
+    return links
+
+
+def print_summary(results):
+    """One line of per-label counts, matching what save_programs writes."""
+    links = _links(results)
+    parts = [
+        f"{getattr(palette, _LABEL_COLOR[label])(label)} {len(links[label])}"
+        for label in LABELS
+    ]
     print()
+    print("  " + f"   {palette.muted('·')}   ".join(parts))
 
 
-def _print_group(label, rows):
-    role = _LABEL_COLOR.get(label, "neutral")
-    print(getattr(palette, role)(f"  {label}"))
-    for f in rows:
-        print()
-        _print_finding(f)
+def save_programs(results, source, include_not_program=False):
+    """Append this run's program links to the per-label files under DDORK_HOME.
 
+    Returns [(label, path, count)] for each file written. Labels with no
+    links this run are skipped, so files only gain a separator when they
+    also gain links.
+    """
+    links = _links(results)
+    if not include_not_program:
+        links.pop("NOT_PROGRAM")
 
-def _print_finding(f):
-    domain = f["domain"]
-    source = f.get("source") or ""
-    left = f"  {domain}"
-
-    if source:
-        pad = " " * max(1, _WIDTH - len(left) - len(source))
-        print(f"{palette.bold(left)}{pad}{palette.muted(source)}")
-    else:
-        print(palette.bold(left))
-
-    url = f.get("url") or ""
-    if url:
-        print(f"    {palette.link(url)}")
-
-    why = (f.get("decision_path") or "").strip()
-    if why:
-        print(f"    {palette.muted(why)}")
-
-
-def print_report(results, show_all=False):
-    all_rows = _flatten(results)
-    rows = all_rows if show_all else [f for f in all_rows if f["label"] != "NOT_PROGRAM"]
-    rows.sort(key=_sort_key)
-
-    total = len(all_rows)
-    paid = sum(1 for f in all_rows if f["label"] == "PAID_BB")
-    vdp = sum(1 for f in all_rows if f["label"] == "VDP")
-    hidden = total - paid - vdp
-
-    _print_header(total, paid, vdp, hidden)
-
-    if not rows:
-        print(palette.muted("  (nothing to show)"))
-        print()
-        return
-
-    by_label = {}
-    for f in rows:
-        by_label.setdefault(f["label"], []).append(f)
-    for label in sorted(by_label, key=lambda L: LABEL_ORDER.get(L, 9)):
-        _print_group(label, by_label[label])
+    stamp = time.strftime("%Y-%m-%d %H:%M")
+    written = []
+    for label, items in links.items():
+        if not items:
+            continue
+        path = os.path.join(ensure_home(), PROGRAM_FILES[label])
+        with open(path, "a", encoding="utf-8") as fh:
+            if fh.tell():
+                fh.write("\n")
+            fh.write(f"# ===== {stamp} · {source} · {len(items)} link(s) =====\n")
+            fh.write("\n".join(items) + "\n")
+        written.append((label, path, len(items)))
+    return written
 
 
 def save_urls(results, path, label_filter=None, min_conf=None):

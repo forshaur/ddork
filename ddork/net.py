@@ -220,6 +220,9 @@ class RateLimited(RuntimeError):
 
 class NonRetryable(RuntimeError):
     """A deterministic failure (HTTP 4xx). Retrying cannot fix it."""
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
 
 
 def retry(fn, tries=3, base=1.5):

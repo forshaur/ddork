@@ -1,8 +1,29 @@
 """Logging setup and shared constants."""
 import logging as lg
+import os
 import sys
 
 log = lg.getLogger("scan")
+
+# Per-user state: scan.log, saved program lists, update-check cache.
+DDORK_HOME = os.path.join(os.path.expanduser("~"), ".ddork")
+LOG_FILE = os.path.join(DDORK_HOME, "scan.log")
+
+
+def ensure_home():
+    """Create DDORK_HOME if needed and return it."""
+    os.makedirs(DDORK_HOME, exist_ok=True)
+    return DDORK_HOME
+
+
+def display_path(path):
+    """`path` with the home directory shown as ~, for terminal output."""
+    home = os.path.expanduser("~")
+    path = str(path)
+    if path == home or path.startswith(home + os.sep):
+        return "~" + path[len(home):]
+    return path
+
 
 # 0 quiet · 1 normal · 2 verbose · 3 debug
 _LOG_LEVELS = {0: lg.WARNING, 1: lg.INFO, 2: lg.INFO, 3: lg.DEBUG}
@@ -19,21 +40,30 @@ def configure_logging(verbose):
     URL), which takes down the whole process because logging's default error
     path is to print a traceback and keep going — but the traceback itself
     prints to the same broken stream, so the run dies.
+
+    The log lives at LOG_FILE and is replaced each run, so it never grows
+    without bound or litters the working directory. Timestamps go to the file
+    only; the terminal never shows dates.
     """
     _reconfigure_std_streams()
 
-    handlers = [lg.FileHandler("scan.log", encoding="utf-8")]
+    handlers = []
+    try:
+        ensure_home()
+        fh = lg.FileHandler(LOG_FILE, mode="w", encoding="utf-8")
+        fh.setFormatter(lg.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+        handlers.append(fh)
+    except OSError:
+        pass  # unwritable home: run without a log file rather than crash
     if verbose >= 3:
-        handlers.append(lg.StreamHandler(sys.stdout))
+        sh = lg.StreamHandler(sys.stdout)
+        sh.setFormatter(lg.Formatter("[%(levelname)s] %(message)s"))
+        handlers.append(sh)
+    if not handlers:
+        handlers.append(lg.NullHandler())  # keep logging's stderr fallback off the UI
 
-    fmt = (
-        "%(asctime)s [%(levelname)s] %(message)s"
-        if verbose >= 3
-        else "[%(levelname)s] %(message)s"
-    )
     lg.basicConfig(
         level=_LOG_LEVELS.get(verbose, lg.INFO),
-        format=fmt,
         handlers=handlers,
         force=True,
     )

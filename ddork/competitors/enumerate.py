@@ -14,7 +14,7 @@ import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 
 from ..config import log
-from ..net import NonRetryable, normalize_domain, retry
+from ..net import NonRetryable, RateLimited, normalize_domain, retry
 from ..concurrency import AdaptiveLimiter
 from ..progress import fmt_secs
 from .distill import get_distill_competitors
@@ -27,12 +27,27 @@ PROVIDERS = [
     (get_owler_competitors, "O"),
 ]
 
+PROVIDER_NAMES = {"S": "spyfu", "D": "distill", "O": "owler"}
+
 PER_PROVIDER = 5
 
 # Hard ceiling for one domain's provider fan-out. Socket timeouts are shorter; this
 # catches anything that still hangs (DNS, redirects, a wedged TLS session) and lets
 # enumeration move on.
 PROVIDER_TIMEOUT = 35.0
+
+
+class _Cancelled(NonRetryable):
+    """The expansion stopped waiting. NonRetryable so retry() gives up at once."""
+
+
+def _block_reason(exc):
+    """'rate-limited (429)' / 'blocked (403)' when the upstream is refusing us, else None."""
+    if isinstance(exc, RateLimited):
+        return "rate-limited (429)"
+    if isinstance(exc, NonRetryable) and getattr(exc, "status", None) == 403:
+        return "blocked (403)"
+    return None
 
 
 class Enumerator:
@@ -53,15 +68,22 @@ class Enumerator:
         self.provider_timeout = PROVIDER_TIMEOUT
         self._lock = th.Lock()
         self._ui_lock = th.Lock()
+        self._blocked = {}  # label -> reason, while that provider is refusing us
 
-    def _call(self, fn, domain, label):
+    def _call(self, fn, domain, label, cancel):
         limiter = self.limiters[label]
+        if cancel.is_set():
+            raise _Cancelled(f"[{label}] {domain}: expansion over")
         limiter.acquire()
+        if cancel.is_set():
+            # Woke up after the expansion gave up: don't send a request nobody reads.
+            limiter.release(ok=None)
+            raise _Cancelled(f"[{label}] {domain}: expansion over")
         try:
             result = fn(domain)
         except NonRetryable:
-            # Deterministic failure: do not shrink the concurrency window.
-            limiter.release(ok=True)
+            # Deterministic failure (4xx): neither shrink nor grow the window.
+            limiter.release(ok=None)
             raise
         except BaseException:
             limiter.release(ok=False)
@@ -70,17 +92,42 @@ class Enumerator:
             limiter.release(ok=True)
             return result
 
+    def _set_blocked(self, label, reason):
+        """Track which providers are refusing us; mirror it on the status line."""
+        with self._ui_lock:
+            if self._blocked.get(label) == reason:
+                return
+            if reason:
+                self._blocked[label] = reason
+                log.warning(f"[{label}] {PROVIDER_NAMES[label]} {reason}")
+            else:
+                self._blocked.pop(label, None)
+                log.info(f"[{label}] {PROVIDER_NAMES[label]} recovered")
+            if not self.ui:
+                return
+            if not self._blocked:
+                self.ui.status("")
+                return
+            parts = [f"{PROVIDER_NAMES[l]} {r}" for l, r in self._blocked.items()]
+            ok = [PROVIDER_NAMES[l] for _, l in PROVIDERS if l not in self._blocked]
+            tail = (f"continuing with {' and '.join(ok)}" if ok
+                    else "all providers blocked, enumeration may stall")
+            self.ui.status(" · ".join(parts + [tail]))
+
     def _expand(self, domain):
         log.info(f"[ENUM] expand {domain}")
 
         pending = {}
+        # Set when this expansion stops waiting, so abandoned provider threads
+        # skip their retry instead of sending requests whose results are dropped.
+        cancel = th.Event()
         pool = ThreadPoolExecutor(max_workers=len(PROVIDERS))
         try:
             for fn, label in PROVIDERS:
                 fut = pool.submit(
                     lambda f=fn, l=label: (
                         l,
-                        retry(lambda: self._call(f, domain, l), tries=2) or [],
+                        retry(lambda: self._call(f, domain, l, cancel), tries=2) or [],
                     )
                 )
                 pending[fut] = label
@@ -105,23 +152,26 @@ class Enumerator:
                     label = pending.pop(fut)
                     try:
                         _, results = fut.result()
-                    except NonRetryable as e:
-                        log.error(f"[{label}] {domain} err: {e}")
-                        if self.ui:
-                            with self._ui_lock:
-                                self.ui.v(2, f"{label} lookup failed for {domain}: {e}", ok=False)
-                        continue
                     except Exception as e:
+                        # NonRetryable is an Exception subclass; both paths just
+                        # log and skip, so one handler covers them.
                         log.error(f"[{label}] {domain} err: {e}")
                         if self.ui:
                             with self._ui_lock:
                                 self.ui.v(2, f"{label} lookup failed for {domain}: {e}", ok=False)
+                        reason = _block_reason(e)
+                        if reason:
+                            self._set_blocked(label, reason)
                         continue
+                    self._set_blocked(label, None)
+
+                    # Parse/normalize outside the lock; only the shared `seen`
+                    # check and list mutations need to be serialized.
+                    candidates = [normalize_domain(r) for r in results]
 
                     with self._lock:
                         fresh = []
-                        for r in results:
-                            d = normalize_domain(r)
+                        for d in candidates:
                             if d and d not in self.seen:
                                 self.seen.add(d)
                                 fresh.append(d)
@@ -163,6 +213,7 @@ class Enumerator:
                         f"{self.provider_timeout:.0f}s; result dropped"
                     )
         finally:
+            cancel.set()
             # Do not join here: a wedged provider must not hold up the expansion.
             pool.shutdown(wait=False)
 

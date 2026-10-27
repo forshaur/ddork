@@ -39,9 +39,12 @@ class AdaptiveLimiter:
             time.sleep(wait)
 
     def release(self, ok):
+        """ok=True grows, ok=False halves, ok=None frees the permit with no AIMD signal."""
         with self._cv:
             self._in_flight -= 1
-            if ok:
+            if ok is None:
+                pass
+            elif ok:
                 self._successes += 1
                 if self._successes >= self.grow_after and self.permits < self.max_permits:
                     self.permits += 1  # additive increase

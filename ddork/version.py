@@ -1,17 +1,17 @@
 """Version detection and update checking.
 
-Two comparison sources:
-
-  * GitHub raw — parse the `version` field from the repo's pyproject.toml.
-    Used for git-installed packages.
-  * PyPI JSON API — used as a fallback when the package is published there.
+Latest versions come from GitHub raw: the `version` field of each repo's
+pyproject.toml (both packages install from git). Results are cached in
+~/.ddork for CACHE_TTL so most runs start without touching the network.
 
 Every network call is best-effort: a failure returns None, never raises.
 Stdlib only (urllib + json), so no new dependency.
 """
 import json
+import os
+import threading
+import time
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 
@@ -19,11 +19,16 @@ from .config import (
     CLASSIFIER_GITHUB,
     CLASSIFIER_PACKAGE,
     DDORK_GITHUB,
+    DDORK_HOME,
     DDORK_PACKAGE,
+    ensure_home,
     log,
 )
 
 _TIMEOUT = 3
+CHECK_BUDGET = _TIMEOUT + 1  # wall-clock cap for the whole startup check
+CACHE_TTL = 24 * 3600
+_CACHE_FILE = os.path.join(DDORK_HOME, "update_check.json")
 
 
 # --- installed versions --------------------------------------------------
@@ -92,18 +97,6 @@ def is_outdated(current, latest):
 
 # --- latest versions -----------------------------------------------------
 
-def fetch_pypi_latest(package, timeout=_TIMEOUT):
-    """Latest version on PyPI, or None on failure / not published."""
-    url = f"https://pypi.org/pypi/{package}/json"
-    try:
-        req = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read())
-        return data.get("info", {}).get("version")
-    except Exception:
-        return None
-
-
 def fetch_github_version(repo, path="pyproject.toml", timeout=_TIMEOUT):
     """Version declared in `path` on the repo's default branch, or None."""
     if not repo:
@@ -130,7 +123,55 @@ def _parse_version_from_toml(text):
     return None
 
 
+# --- cache ---------------------------------------------------------------
+
+def _read_cache():
+    """(ddork_latest, classifier_latest) if checked within CACHE_TTL, else None."""
+    try:
+        with open(_CACHE_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if time.time() - data["checked_at"] < CACHE_TTL:
+            return data["ddork"], data["isbounty"]
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return None
+
+
+def _write_cache(d_latest, c_latest):
+    # Only cache a complete answer, so a network blip doesn't hide updates for a day.
+    if not (d_latest and c_latest):
+        return
+    try:
+        ensure_home()
+        with open(_CACHE_FILE, "w", encoding="utf-8") as fh:
+            json.dump({"checked_at": time.time(),
+                       "ddork": d_latest, "isbounty": c_latest}, fh)
+    except OSError as e:
+        log.debug(f"[UPD] cannot write update cache: {e}")
+
+
 # --- combined check ------------------------------------------------------
+
+def _fetch_latest(*repos, budget=CHECK_BUDGET):
+    """Latest version per repo, fetched in parallel, within `budget` seconds total.
+
+    urlopen's timeout does not cover DNS resolution, so a hung resolver can
+    block it indefinitely. Daemon threads plus a bounded join keep startup
+    and process exit from waiting on that; a repo that runs out of time is None.
+    """
+    out = [None] * len(repos)
+
+    def work(i, repo):
+        out[i] = fetch_github_version(repo)
+
+    threads = [threading.Thread(target=work, args=(i, r), daemon=True)
+               for i, r in enumerate(repos)]
+    for t in threads:
+        t.start()
+    deadline = time.monotonic() + budget
+    for t in threads:
+        t.join(max(0.0, deadline - time.monotonic()))
+    return out
 
 def check_updates():
     """Return (ddork_info, classifier_info). Never raises.
@@ -141,24 +182,15 @@ def check_updates():
     d_installed = get_ddork_version()
     c_installed = get_classifier_version()
 
-    # ddork's own check only runs when a repo is configured. The PyPI fallback
-    # is skipped on purpose: a similarly-named package there would produce a
-    # false "outdated" warning (this already bit us once).
-    def _d_latest():
-        if not DDORK_GITHUB:
-            return None
-        return (fetch_github_version(DDORK_GITHUB)
-                or fetch_pypi_latest(DDORK_PACKAGE))
-
-    def _c_latest():
-        return (fetch_github_version(CLASSIFIER_GITHUB)
-                or fetch_pypi_latest(CLASSIFIER_PACKAGE))
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        d_fut = pool.submit(_d_latest)
-        c_fut = pool.submit(_c_latest)
-        d_latest = d_fut.result()
-        c_latest = c_fut.result()
+    cached = _read_cache()
+    if cached:
+        d_latest, c_latest = cached
+    else:
+        # GitHub only: both packages install from git, and a similarly-named
+        # PyPI package would produce a false "outdated" warning (this already
+        # bit us once).
+        d_latest, c_latest = _fetch_latest(DDORK_GITHUB, CLASSIFIER_GITHUB)
+        _write_cache(d_latest, c_latest)
 
     d_info = {
         "name": DDORK_PACKAGE,

@@ -28,6 +28,7 @@ If your dork query missed a company's bug bounty program to get it indexed on th
 - **Security Policy Extraction:** Checks `security.txt` and search engine results for security and disclosure policies.
 - **Smart Program Classification:** Integrates with `isbounty` to categorize policy text with confidence scoring and decision paths.
 - **State Persistence:** Tracks analyzed targets in SQLite to allow incremental and new-only delta scans across runs.
+- **Saved Program Lists:** Appends program links from every run to `~/.ddork/paid_programs.txt` and `~/.ddork/vdp.txt`, one dated block per run.
 - **Flexible Exporting:** Saves structured results into TSV format with label and confidence filtering.
 
 ---
@@ -101,7 +102,24 @@ ddork -u https://example.com -n 30 --store targets.sqlite
 ddork -u https://example.com -n 30 --store targets.sqlite --new-only
 ```
 
-### 5. Export Findings to TSV
+### 5. Where Results Go
+
+The terminal shows only how many `PAID_BB`, `VDP` and `NOT_PROGRAM` findings a run produced. The program links are appended to text files in `~/.ddork/` (on Windows, `C:\Users\<you>\.ddork\`), with a dated separator before each run's block:
+
+```text
+# ===== 2026-10-28 14:05 · seed example.com · 2 link(s) =====
+https://acme.com/security
+https://hackerone.com/widgetco
+```
+
+| File | Contents |
+| :--- | :--- |
+| `paid_programs.txt` | `PAID_BB` links |
+| `vdp.txt` | `VDP` links |
+| `not_program.txt` | `NOT_PROGRAM` links (only with `--all`) |
+| `scan.log` | Log of the latest run (replaced each run) |
+
+### 6. Export Findings to TSV
 
 Export results to a file with optional label and confidence filtering:
 
@@ -128,7 +146,7 @@ ddork -f domains.txt -o paid_bounties.tsv PAID_BB
 | `--min-conf <FLOAT>` | Minimum confidence threshold for file output. |
 | `--store <PATH>` | Path to SQLite database for state and run tracking. |
 | `--new-only` | Display only findings first seen in the current run (requires `--store`). |
-| `--all` | Include `NOT_PROGRAM` results in the terminal report. |
+| `--all` | Also save `NOT_PROGRAM` links to `~/.ddork/not_program.txt`. |
 | `--enumerate-only [FILE]` | Stop after competitor enumeration and save domains to file. |
 | `-v, --verbose <0-3>` | Verbosity level (`0`=quiet, `1`=normal, `2`=verbose, `3`=debug). |
 | `--debug` | Alias for `-v 3`. |
