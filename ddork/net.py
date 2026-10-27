@@ -1,6 +1,7 @@
 """Small, dependency-free networking/domain helpers shared across the package."""
 import asyncio as aio
 import random
+import re
 import time
 from functools import lru_cache
 from threading import local
@@ -66,6 +67,44 @@ def to_registrable_domain(hostname):
     return f"{ext.domain}.{ext.suffix}"
 
 
+# --- Relevance checks (ddg.py / exa.py / searx.py) -----------------------
+
+# Registrable domains of known bug-bounty platforms. A result hosted on one of
+# these counts as relevant if the target's brand slug appears in the URL or
+# snippet — that's how we keep hackerone.com/<target> and reject
+# hackerone.com/some-other-company.
+BOUNTY_PLATFORMS = {
+    "hackerone.com", "bugcrowd.com", "yeswehack.com", "intigriti.com",
+    "openbugbounty.org", "hackenproof.com", "synack.com", "cobalt.io",
+    "immunefi.com", "bugbounty.jp", "zerocopter.com", "safehats.com",
+    "federacy.com", "detectify.com", "hackerbay.com", "bugbase.in",
+    "redstorm.io", "vulncheck.com",
+}
+
+
+def host_matches(domain, url):
+    """True if url's host is `domain` itself or a subdomain of it, ignoring www."""
+    if not domain or not url:
+        return False
+    target = normalize_domain(domain)
+    host = normalize_domain(url)
+    if not target or not host:
+        return False
+    return host == target or host.endswith("." + target)
+
+
+def is_relevant_result(domain, url, text=""):
+    """Relevant if hosted on the target's own domain, or on a known bounty
+    platform and mentioning the target's brand slug."""
+    if host_matches(domain, url):
+        return True
+    host = normalize_domain(url)
+    slug = domain.split(".")[0] if domain else None
+    if not host or host not in BOUNTY_PLATFORMS or not slug:
+        return False
+    return bool(re.search(rf"\b{re.escape(slug)}\b", f"{url} {text}".lower()))
+
+
 # --- URL canonicalization ------------------------------------------------
 
 _TRACKING_PARAMS = {
@@ -75,7 +114,8 @@ _TRACKING_PARAMS = {
 
 
 def canonicalize_url(url):
-    """Normalize a URL for dedup."""
+    """Normalize a URL for dedup. Lowercases scheme+host, strips default
+    ports, leading www., tracking params, and a trailing slash on the path."""
     if not url:
         return None
     if "://" not in url:
@@ -92,6 +132,8 @@ def canonicalize_url(url):
         host = host[:-3]
     elif scheme == "https" and host.endswith(":443"):
         host = host[:-4]
+    if host.startswith("www."):
+        host = host[4:]
     path = p.path or "/"
     if len(path) > 1 and path.endswith("/"):
         path = path.rstrip("/") or "/"
@@ -107,37 +149,48 @@ def canonicalize_url(url):
 
 class DomainRateLimiter:
     """Fair per-domain rate limiting using token buckets.
-    
-    Replaces global AIMD: one slow/dead domain no longer throttles all others.
-    Each domain gets its own bucket (default: 2 req/s, burst 5).
+
+    Each domain gets its own bucket (default: 2 req/s, burst 5) AND its own
+    lock, so:
+      - a slow/blocked domain never throttles an unrelated one (per-bucket)
+      - same-domain callers can't outrun the bucket (per-bucket lock held
+        across the read-compute-sleep-consume sequence)
+
+    The previous version released the shared lock before the token math and
+    the `await aio.sleep()`; two same-domain coroutines would then both read a
+    stale token balance and both consume a token the bucket only held once,
+    silently exceeding the configured rate under concurrent load.
     """
     def __init__(self, rate=2.0, capacity=5):
         self.rate = rate
         self.capacity = capacity
         self._buckets = {}
-        self._lock = aio.Lock()
-    
-    async def acquire(self, domain: str):
-        """Acquire a token for the given domain, waiting if necessary."""
-        async with self._lock:
-            if domain not in self._buckets:
-                self._buckets[domain] = {
-                    "tokens": self.capacity,
-                    "last": time.monotonic()
-                }
-            bucket = self._buckets[domain]
-        
-        now = time.monotonic()
-        elapsed = now - bucket["last"]
-        bucket["tokens"] = min(self.capacity, bucket["tokens"] + elapsed * self.rate)
-        bucket["last"] = now
-        
-        if bucket["tokens"] < 1:
-            sleep_time = (1 - bucket["tokens"]) / self.rate
-            await aio.sleep(sleep_time)
-            bucket["tokens"] = 0
-        else:
-            bucket["tokens"] -= 1
+        self._map_lock = aio.Lock()
+
+    async def _get_bucket(self, domain):
+        async with self._map_lock:
+            b = self._buckets.get(domain)
+            if b is None:
+                b = {"tokens": self.capacity,
+                     "last": time.monotonic(),
+                     "lock": aio.Lock()}
+                self._buckets[domain] = b
+            return b
+
+    async def acquire(self, domain):
+        bucket = await self._get_bucket(domain)
+        async with bucket["lock"]:
+            now = time.monotonic()
+            elapsed = now - bucket["last"]
+            bucket["tokens"] = min(self.capacity,
+                                   bucket["tokens"] + elapsed * self.rate)
+            bucket["last"] = now
+            if bucket["tokens"] < 1:
+                sleep_time = (1 - bucket["tokens"]) / self.rate
+                await aio.sleep(sleep_time)
+                bucket["tokens"] = 0
+            else:
+                bucket["tokens"] -= 1
 
 
 # Global instance used by analyzer
@@ -146,21 +199,15 @@ domain_limiter = DomainRateLimiter(rate=2.0, capacity=5)
 
 async def gated_sync(limiter, fn, *args, **kwargs):
     """Run sync fn(*args) in a thread under the per-domain limiter.
-    
-    Args:
-        limiter: DomainRateLimiter instance (or None to skip limiting)
-        fn: Sync function to run
-        *args: Positional args for fn
-        **kwargs: Must include 'domain' key for rate limiting
-    
-    Returns the fn result (or None on failure). Never raises.
+
+    `domain` kwarg is required for rate limiting and is popped before the call.
+    Returns the fn result, or None on failure. Never raises.
     """
-    domain = kwargs.pop('domain', None)
+    domain = kwargs.pop("domain", None)
     if limiter and domain:
         await limiter.acquire(domain)
     try:
-        result = await aio.to_thread(fn, *args)
-        return result
+        return await aio.to_thread(fn, *args)
     except Exception:
         return None
 
@@ -171,11 +218,18 @@ class RateLimited(RuntimeError):
         self.retry_after = retry_after
 
 
+class NonRetryable(RuntimeError):
+    """A deterministic failure (HTTP 4xx). Retrying cannot fix it."""
+    def __init__(self, message, status=None):
+        super().__init__(message)
+        self.status = status
+
+
 def retry(fn, tries=3, base=1.5):
     for a in range(tries):
         try:
             return fn()
-        except RateLimited:
+        except (RateLimited, NonRetryable):
             raise
         except Exception:
             if a == tries - 1:
@@ -187,7 +241,7 @@ async def retry_async(fn, tries=3, base=1.0):
     for a in range(tries):
         try:
             return await fn()
-        except RateLimited:
+        except (RateLimited, NonRetryable):
             raise
         except Exception:
             if a == tries - 1:
@@ -196,7 +250,7 @@ async def retry_async(fn, tries=3, base=1.0):
 
 
 class GlobalRateLimiter:
-    """Kept for ddg.py / exa.py which need per-backend pacing."""
+    """Paces a single upstream to a fixed req/s. Used by ddg.py / exa.py."""
     def __init__(self, requests_per_second):
         self.interval = 1.0 / requests_per_second
         self._last_scheduled_time = 0.0

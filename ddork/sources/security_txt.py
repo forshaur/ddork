@@ -1,13 +1,20 @@
 """Look up a domain's security.txt (RFC 9116). Returns dict with:
 found, source_url, policy_url, snippet (short), body (full text).
 
-Every HTTP call goes through the shared AIMD limiter so global request concurrency is
-capped regardless of how many domains run concurrently.
-
-v3.1: uses the shared per-thread session from net.get_session() so we don't pay
-TCP+TLS setup on every candidate path.
+Parsing notes:
+  - The `policy:` value is extracted with a line-anchored regex (tolerant of
+    arbitrary whitespace after the colon) rather than `split(":", 1)`, which
+    mangles any value containing a colon of its own.
+  - The extracted value is validated with urlparse: scheme must be http/https
+    and netloc must be non-empty. mailto:, relative paths, and garbage are
+    rejected so the analyzer never tries to fetch them.
+  - When the policy value is missing or invalid we still return found=True
+    with policy_url=None. This is deliberate: the analyzer passes
+    `body` to the classifier as security_txt context for whatever URL it ends
+    up classifying, and returning found=False would strip that context.
 """
 import re
+from urllib.parse import urlparse as up
 
 from ..config import log
 from ..net import get_session, gated_sync
@@ -21,6 +28,10 @@ CANDIDATE_PATHS = (
 PGP_BLOCK_RE = re.compile(
     r'-----BEGIN PGP SIGNED MESSAGE-----.*?-----END PGP SIGNATURE-----', re.S
 )
+
+# Anchored at line start (MULTILINE) with optional leading whitespace; matches
+# the first `policy:` field. Value captured until end of line.
+_POLICY_RE = re.compile(r"^\s*policy\s*:\s*(.+?)\s*$", re.I | re.M)
 
 _EMPTY = {"found": False, "source_url": None, "policy_url": None,
           "snippet": None, "body": None}
@@ -36,18 +47,33 @@ def _fetch(u):
     return r.text
 
 
+def _valid_policy_url(value):
+    """Return `value` if it looks like a fetchable http(s) URL, else None."""
+    if not value:
+        return None
+    try:
+        p = up(value)
+    except Exception:
+        return None
+    if p.scheme not in ("http", "https") or not p.netloc:
+        return None
+    return value
+
+
 async def check_security_txt(domain, limiter):
     for u in (p.format(d=domain) for p in CANDIDATE_PATHS):
         text = await gated_sync(limiter, _fetch, u, domain=domain)
         if not text:
             continue
-        body = PGP_BLOCK_RE.sub('', text).strip()
-        policy = next(
-            (l.split(":", 1)[1].strip()
-             for l in body.splitlines() if l.lower().startswith("policy:")),
-            None,
-        )
-        log.info(f"[SEC] {domain} policy: {policy}")
+        body = PGP_BLOCK_RE.sub("", text).strip()
+        m = _POLICY_RE.search(body)
+        raw_policy = m.group(1).strip() if m else None
+        policy = _valid_policy_url(raw_policy)
+        if policy is None:
+            log.info(f"[SEC] {domain} found at {u} but policy value "
+                     f"missing or unparseable: {raw_policy!r}")
+        else:
+            log.info(f"[SEC] {domain} policy: {policy}")
         return {
             "found": True,
             "source_url": u,

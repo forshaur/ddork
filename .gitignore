@@ -3,24 +3,39 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Caches and testing
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
 # Logs
 *.log
 scan.log
 targets.txt
+
 # Virtual environments
 venv/
 env/
 .venv/
+ENV/
 
 # Build and distribution
 build/
 dist/
 *.egg-info/
+*.egg
 
-# IDEs and editors
-.vscode/
-.idea/
-*.swp
+# Output and data files
 *.tsv
 *.txt
 *.sqlite
+
+# IDEs and OS metadata
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+

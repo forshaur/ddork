@@ -3,7 +3,7 @@ import json
 
 from curl_cffi import requests as rq
 
-from ..net import RateLimited, get_user_agent, normalize_domain
+from ..net import NonRetryable, RateLimited, get_user_agent, normalize_domain
 
 
 def get_distill_competitors(domain):
@@ -28,6 +28,11 @@ def get_distill_competitors(domain):
                 f"distill {domain}: rate limited (429)" +
                 (f", retry-after={ra}s" if ra else ""),
                 retry_after=ra,
+            )
+        if 400 <= r.status_code < 500:
+            raise NonRetryable(
+                f"distill {domain}: HTTP {r.status_code}: {r.text[:200]!r}",
+                status=r.status_code,
             )
         if r.status_code != 200:
             raise RuntimeError(

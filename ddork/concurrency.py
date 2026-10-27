@@ -7,11 +7,10 @@ once hundreds of domains are queued behind it, especially with the old delay mec
 (which only slept between *collecting* results, not between requests, so it never actually
 throttled anything).
 
-Fix: AIMD, the same idea TCP congestion control uses. Start conservative, add 1 concurrent
-permit per run of clean successes, halve permits the instant a request fails (treat any
-failure as a possible block/rate-limit until proven otherwise). One instance is shared for
-the whole enumeration run -- not reset per BFS level -- so it keeps adapting as the frontier
-grows or shrinks.
+Fix: AIMD, the same idea TCP congestion control uses. Start at the configured cap, add 1
+concurrent permit per run of clean successes, halve permits the instant a request fails
+(treat any failure as a possible block/rate-limit until proven otherwise). Enumeration keeps
+one instance per provider, because a block on one upstream says nothing about the others.
 """
 import threading
 import time
@@ -21,7 +20,7 @@ class AdaptiveLimiter:
     def __init__(self, max_permits, min_permits=1, grow_after=5, min_interval=0.0):
         self.max_permits = max(min_permits, max_permits)
         self.min_permits = min_permits
-        self.permits = max(min_permits, max_permits // 4 or min_permits)  # start conservative
+        self.permits = self.max_permits  # start at the cap; AIMD halves on failure
         self.grow_after = grow_after
         self.min_interval = min_interval
         self._in_flight = 0
@@ -40,9 +39,12 @@ class AdaptiveLimiter:
             time.sleep(wait)
 
     def release(self, ok):
+        """ok=True grows, ok=False halves, ok=None frees the permit with no AIMD signal."""
         with self._cv:
             self._in_flight -= 1
-            if ok:
+            if ok is None:
+                pass
+            elif ok:
                 self._successes += 1
                 if self._successes >= self.grow_after and self.permits < self.max_permits:
                     self.permits += 1  # additive increase

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ddork"
-version = "1.0.0"
+version = "1.0.3"
 description = "new and (less|un)known bug-bounty program discovery tool"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -12,8 +12,12 @@ dependencies = [
     "rich",
     "curl-cffi",
     "beautifulsoup4",
-    "ddgs"
+    "ddgs",
+    "tldextract"
 ]
 
 [project.scripts]
-ddork = "ddork.cli:main"
+ddork = "ddork.cli:run"
+
+[tool.setuptools]
+packages = ["ddork", "ddork.competitors", "ddork.sources"]

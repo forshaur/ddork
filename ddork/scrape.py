@@ -1,6 +1,7 @@
 """Fetch + clean a page into (text, headings), mirroring isBounty's _clean_html.
 
-v3.1: uses the shared per-thread session so we don't pay TCP+TLS setup per page.
+Uses the shared per-thread curl_cffi session so we don't pay TCP+TLS setup
+per page.
 """
 from bs4 import BeautifulSoup as bs
 
