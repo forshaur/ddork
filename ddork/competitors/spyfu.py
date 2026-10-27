@@ -4,7 +4,7 @@ import re
 from curl_cffi import requests as rq
 from bs4 import BeautifulSoup as bs
 
-from ..net import RateLimited, normalize_domain
+from ..net import NonRetryable, RateLimited, normalize_domain
 
 CSRF_META_RE = re.compile(r"csrf-token", re.I)
 CSRF_INLINE_RE = re.compile(
@@ -34,6 +34,7 @@ def get_spyfu_competitors(domain):
             "https://www-in.spyfu.com/NsaApi/Competitors/GetTopOrganicCompetitors",
             params={"domain": domain, "countryCode": "US"},
             headers=headers,
+            timeout=15,
         )
         if r.status_code == 429:
             ra = r.headers.get("Retry-After")
@@ -42,6 +43,10 @@ def get_spyfu_competitors(domain):
                 f"spyfu {domain}: rate limited (429)" +
                 (f", retry-after={ra}s" if ra else ""),
                 retry_after=ra,
+            )
+        if 400 <= r.status_code < 500:
+            raise NonRetryable(
+                f"spyfu {domain}: HTTP {r.status_code}: {r.text[:200]!r}"
             )
         if r.status_code != 200:
             raise RuntimeError(

@@ -218,11 +218,15 @@ class RateLimited(RuntimeError):
         self.retry_after = retry_after
 
 
+class NonRetryable(RuntimeError):
+    """A deterministic failure (HTTP 4xx). Retrying cannot fix it."""
+
+
 def retry(fn, tries=3, base=1.5):
     for a in range(tries):
         try:
             return fn()
-        except RateLimited:
+        except (RateLimited, NonRetryable):
             raise
         except Exception:
             if a == tries - 1:
@@ -234,7 +238,7 @@ async def retry_async(fn, tries=3, base=1.0):
     for a in range(tries):
         try:
             return await fn()
-        except RateLimited:
+        except (RateLimited, NonRetryable):
             raise
         except Exception:
             if a == tries - 1:
