@@ -230,17 +230,15 @@ class ProgressBar:
 
         fixed = (len(self.INDENT) + self.MAX_LABEL_WIDTH + 1 + 4 + 1 + 2 + 1
                  + len(count) + 1 + self.ETA_WIDTH)
-        if width < fixed + 3:
-            # Too narrow for a bar: keep the essentials on one line.
+        slots = width - fixed - visible_len(suffix)
+        if slots < self.MIN_SLOTS:
+            # Not enough room for a bar next to everything else. The tally
+            # matters more than the bar, so drop the bar (and ETA) first.
             compact = (f"{self.INDENT}{label_disp} "
                        f"{palette.neutral(f'{pct}%')} {palette.muted(count)}")
             if visible_len(compact + suffix) <= width:
                 compact += suffix
             return compact
-        slots = width - fixed - visible_len(suffix)
-        if slots < self.MIN_SLOTS and suffix:
-            suffix, slots = "", width - fixed  # the bar matters more than the tally
-        slots = max(3, slots)
 
         filled = int(round(pct / 100 * slots))
         if filled <= 0:
